@@ -1,0 +1,47 @@
+{
+  "format": "ccs-ontology/1",
+  "classes": {
+    "Vehicle": {
+      "label": "Vehicle",
+      "same_as": "https://schema.org/Vehicle",
+      "aliases": [
+        "property"
+      ]
+    }
+  },
+  "terms": {
+    "Vehicle.highway_vignette_fee": {
+      "label": "Highway Vignette Fee",
+      "same_as": "",
+      "aliases": [
+        "dalnicni_znamka"
+      ]
+    },
+    "Vehicle.insurance_cost": {
+      "label": "Insurance Cost",
+      "same_as": "",
+      "aliases": [
+        "assurence_cost"
+      ]
+    },
+    "Vehicle.mileage_from_odometer": {
+      "label": "Mileage",
+      "same_as": "https://schema.org/mileageFromOdometer",
+      "aliases": [
+        "najeto"
+      ]
+    },
+    "Vehicle.model": {
+      "label": "Model",
+      "same_as": "https://schema.org/model",
+      "aliases": []
+    },
+    "Vehicle.vehicle_type": {
+      "label": "Vehicle Type",
+      "same_as": "",
+      "aliases": [
+        "type"
+      ]
+    }
+  }
+}

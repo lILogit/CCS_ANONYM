@@ -1,0 +1,12 @@
+# secrets
+.env
+
+# sensitive: real models and de-anonymized outputs
+cc_model.md
+*.local.py
+*.idtable.*
+
+# generated
+graphify-out/
+__pycache__/
+.pytest_cache/
