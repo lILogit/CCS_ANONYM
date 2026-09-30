@@ -15,6 +15,7 @@ stdlib + `anthropic` + `httpx`).
 | `cc_model.md` | your real input model - local only, git-ignored | **yes** |
 | `sample_model.md` | fictional demo model (published) | no |
 | `*.local.py` | output: ID_TABLE + calculation with real values (mode 600) | **yes** |
+| `*.onto.md` | opt-in `--rewrite` output: model with ontology names, real values (mode 600) | **yes** |
 | `.env` | `ANTHROPIC_API_KEY` | **yes, secret** |
 | `graphify-out/` | code graph (built from a copy of `ccs_anon.py` only) | no |
 
@@ -24,7 +25,13 @@ stdlib + `anthropic` + `httpx`).
 python3 -m pytest -q test_ccs_anon.py                          # must stay green, no API key needed
 python3 ccs_anon.py cc_model.md "question" --dry-run           # safe preview: no network, writes nothing
 python3 ccs_anon.py cc_model.md "question" --ontology-mapper none|ollama|claude
+python3 ccs_anon.py cc_model.md "question" --public type --rewrite --retries 2
 ```
+
+Every run (also `--dry-run`) prints, in order: the entity overview (`mapping_text`: entity →
+class (status), key → property → ID/`public`, no values), the ID table, the model with
+ontology names (`table.renamed`), then what is sent to the LLM. The middle two contain
+**real values** - terminal only; never paste a `cc_model.md` run into docs or artifacts.
 
 ## Privacy rules (non-negotiable)
 
@@ -38,6 +45,10 @@ python3 ccs_anon.py cc_model.md "question" --ontology-mapper none|ollama|claude
 - Any new outbound payload needs a test asserting that none of `SECRETS` appears in it
   (see `test_end_to_end`, `test_mapper_request_has_no_values`).
 - Sensitive outputs are written with mode 600 (`write_private`, `IdTable.save`).
+- Errors fed back to the LLM go through `describe_error()` only - never `str(e)` of a
+  runtime exception (`float('Porsche')` quotes the value).
+- To test against real Claude, use `sample_model.md` copied to the scratchpad with
+  `--ontology <scratch>/ontology.json`, so the real ontology and repo stay untouched.
 
 ## Architecture (in pipeline order, driven by `main()`)
 
@@ -47,24 +58,34 @@ python3 ccs_anon.py cc_model.md "question" --ontology-mapper none|ollama|claude
    An invalid or missing answer gives a `fallback` (ASCII name, never saved). An entity
    resolves to a class only if that class has a term for *every* key, so a generic name
    like `property` can map to different classes.
-2. **Anonymize** (`IdTable.from_model`): numbers → `N01…`, text → `T01…`, keys → ontology
-   properties; `--public` keys keep their values. `IdTable.scrub` replaces values the user
+2. **Anonymize** (`IdTable.from_model`, one resolve pass): numbers → `N01…`, text → `T01…`,
+   keys → ontology properties; `--public` keys keep their values. It also fills
+   `table.entities` (per-entity overview) and `table.renamed` (model with ontology names,
+   real values, fallback entities left as written); edits go through `apply_edits`. `IdTable.scrub` replaces values the user
    typed in the question (numbers compared by value, text on whole words).
-3. **LLM** (`ask_llm` → `claude()`): all Claude calls go through `claude()`.
+3. **LLM** (`ask_llm` → `claude()`): all Claude calls go through `claude()`. A repair call
+   adds the rejected code (IDs only) and the `describe_error()` text.
 4. **Validate** (`validate`): AST allowlist, straight-line code only; `**` needs a literal
-   exponent ≤ 100; no subscripts, loops, functions, imports or dunders. `execute` runs with
-   `SAFE_BUILTINS` only.
+   exponent ≤ 100; no subscripts, loops, functions, imports or dunders; every loaded name must be
+   an ID, assigned, `math` or a safe builtin. Rule breaks raise `CodeRejected` (a `ValueError`).
+   `execute` runs with `SAFE_BUILTINS` only and needs a dict `result`. On any failure `main()`
+   asks for a fix up to `--retries` times (default 2; `--code-file` fails at once), sending only
+   `describe_error()` (rule text, or exception *type* + line).
 5. **Output** (`render_script`): the one output file `<model>.local.py`; `IdTable.load`
    reads it back (also `.json`/`.csv`).
+   `--rewrite` also saves `table.renamed` to `<model>.onto.md` (mode 600), never over the
+   model itself.
 
 ## Conventions and gotchas
 
-- Keep it one module; the user prefers **fewer files**. Optional exports (`--table`) stay opt-in.
+- Keep it one module; the user prefers **fewer files**. Optional exports (`--table`,
+  `--rewrite`) stay opt-in; `test_end_to_end` asserts exactly two files after a default run.
 - **Never overwrite the model file.** A `with_suffix` bug once replaced `cc_model.md`
   (restored from VS Code local history). Build output paths with `with_name(stem + …)`,
   and keep the overwrite guard in `main()` covering every output path.
 - Tests must never touch the real `ontology.json`: the autouse `ontology_path` fixture
-  patches `ca.ONTOLOGY_PATH`. New Claude calls must be handled in `FakeMessages.create`.
+  patches `ca.ONTOLOGY_PATH`. New Claude calls must be handled in `FakeMessages.create`;
+  queue calculation answers in `FakeMessages.replies` (e.g. bad code to exercise repairs).
 - Anthropic SDK is 0.86: the server-side fallback is passed as
   `betas=["server-side-fallback-2026-07-01"]` + `extra_body={"fallbacks": "default"}`
   (no typed kwarg yet). Structured output uses
@@ -74,5 +95,10 @@ python3 ccs_anon.py cc_model.md "question" --ontology-mapper none|ollama|claude
   when extending an existing ontology but picks wrong classes from an empty one.
 - Known parser limitation: dates like `15.03.2021` parse as the number `15.03`. Use years
   or durations until a date parser exists.
+- Everything after the number is the unit, so `120.000 / km` gives unit `/km`; write `120.000 km`.
+- `scrub` also replaces ordinary words in the question that equal a text value (`car` →
+  `T01` when `type: car`); mark such keys `--public` when they are not sensitive.
+- The model has no tax rules: net-income questions get LLM-guessed rates unless the rates
+  are put in the model (public keys) or the question.
 - Numbers use Czech/EU formats: `250.000` / `250 000` = 250000, `12,5` = 12.5; the text
   after the number is the unit (`Kč/monthly`); units always include the period.

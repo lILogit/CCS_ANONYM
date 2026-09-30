@@ -4,6 +4,7 @@
 # sensitive: real models and de-anonymized outputs
 cc_model.md
 *.local.py
+*.onto.md
 *.idtable.*
 
 # generated

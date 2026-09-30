@@ -159,6 +159,8 @@ def test_table_lookups(table):
     "result = {'x': 10 ** 10 ** 10}",
     "result = {'x': N01 ** N02}",
     "result = {'x': [N01][0]}",
+    "result = {'x': N99}",                                  # invented ID
+    "result = {'x': undefined_var}",
 ])
 def test_validate_rejects(bad, table):
     with pytest.raises((ValueError, SyntaxError)):
@@ -168,6 +170,22 @@ def test_validate_rejects(bad, table):
 def test_validate_accepts(table):
     ca.validate(LLM_CODE, set(table.by_id))
     ca.validate("x = math.sqrt(N01) if N01 > 0 else 0\nresult = {'x': round(x, 2)}", set(table.by_id))
+
+
+def test_result_must_be_dict(table):
+    with pytest.raises(ca.CodeRejected, match="must be a dict"):
+        ca.execute(ca.validate("result = N01", set(table.by_id)), table)
+
+
+@pytest.mark.parametrize("code,expected", [
+    ("result = {'x': float(T02)}", "ValueError at run time (line 1)"),     # message would quote 'Porsche'
+    ("a = 1\nresult = {'x': N01 / 0}", "ZeroDivisionError at run time (line 2)"),
+    ("result = {'x': T02 + N01}", "TypeError at run time (line 1)"),
+])
+def test_describe_error_has_no_values(table, code, expected):
+    with pytest.raises(Exception) as e:
+        ca.execute(ca.validate(code, set(table.by_id)), table)
+    assert ca.describe_error(e.value) == expected
 
 
 def test_exec_has_no_real_builtins(table):
@@ -211,6 +229,8 @@ def test_deanonymize_avoids_name_clash(table):
 # --- 7. end-to-end with mocked Claude -------------------------------------- #
 
 class FakeMessages:
+    replies: list = []                                # queued calculation answers, then LLM_CODE
+
     def __init__(self, sent):
         self.sent = sent
 
@@ -224,7 +244,7 @@ class FakeMessages:
                  "keys": [{"key": k, "property": FAKE_TERMS.get(k, k), "label": k, "same_as": ""}
                           for k in e["keys"]]} for e in req]})
         else:
-            text = "```python\n" + LLM_CODE + "```"
+            text = "```python\n" + (self.replies.pop(0) if self.replies else LLM_CODE) + "```"
         return SimpleNamespace(stop_reason="end_turn", stop_details=None,
                                content=[SimpleNamespace(type="thinking", text=""),
                                         SimpleNamespace(type="text", text=text)])
@@ -234,6 +254,7 @@ class FakeMessages:
 def fake_claude(monkeypatch):
     import anthropic
     sent = []
+    monkeypatch.setattr(FakeMessages, "replies", [])
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
     monkeypatch.setattr(anthropic, "Anthropic",
                         lambda: SimpleNamespace(beta=SimpleNamespace(messages=FakeMessages(sent))))
@@ -280,6 +301,29 @@ def test_end_to_end(monkeypatch, capsys, model, fake_claude, ontology_path):
     run_main(monkeypatch, model, "again")
     assert len(fake_claude) == 1 and "output_config" not in fake_claude[0]
     assert "(known)" in capsys.readouterr().out
+
+
+def test_repair_loop_sends_no_values(monkeypatch, capsys, model, fake_claude):
+    FakeMessages.replies[:] = ["result = {'x': float(T02)}", "result = {'x': N99}"]
+    result = run_main(monkeypatch, model, "x")
+    assert result["label"] == "Porsche"                              # third attempt succeeded
+    calc = [r for r in fake_claude if "output_config" not in r]
+    assert len(calc) == 3
+    assert "ValueError at run time" in calc[1]["messages"][0]["content"]
+    assert "undefined names" in calc[2]["messages"][0]["content"]
+    for req in fake_claude:
+        payload = json.dumps(req, ensure_ascii=False, default=str)
+        for s in SECRETS:
+            assert s not in payload, f"leaked {s!r}"
+    assert "!! rejected" in capsys.readouterr().out
+
+
+def test_repair_gives_up(monkeypatch, model, fake_claude):
+    FakeMessages.replies[:] = ["x = 1"] * 3
+    with pytest.raises(SystemExit, match="does not assign"):
+        run_main(monkeypatch, model, "x", "--retries", "1")
+    assert len([r for r in fake_claude if "output_config" not in r]) == 2
+    assert not (model.parent / "cc_model.local.py").exists()
 
 
 def test_dry_run_does_not_call_llm(monkeypatch, capsys, model, fake_claude):
@@ -428,11 +472,51 @@ def test_duplicate_properties_are_made_unique(ontology_path):
     assert [r.term for r in t.records] == ["Thing.cost", "Thing.cost_2", "Thing.cost_3"]
 
 
+def test_mapping_text_groups_entities(ontology_path):
+    _, t = ca.IdTable.from_model(SAMPLE, {"type"}, ca.Ontology(ontology_path), fake_mapper([]))
+    lines = t.mapping_text().splitlines()
+    assert lines[0] == "  $ property -> Vehicle  (learned)"
+    assert lines[1].split() == ["type", "->", "vehicle_type", "public"]
+    assert lines[3].split() == ["assurence_cost", "->", "insurance_premium", "N01", "[Kč/monthly]"]
+    for secret in SECRETS:                                        # names and IDs only, never values
+        assert secret not in t.mapping_text()
+
+
 def test_public_key_translated_value_kept(ontology_path):
     anon, t = ca.IdTable.from_model(SAMPLE, {"type"}, ca.Ontology(ontology_path), fake_mapper([]))
     assert "vehicle_type: car" in anon
     assert ("property", "type", "Vehicle.vehicle_type", "learned") in t.mapping
     assert "type" not in {r.key for r in t.records}
+
+
+def test_renamed_model_keeps_values(ontology_path):
+    _, t = ca.IdTable.from_model(SAMPLE, ontology=ca.Ontology(ontology_path), mapper=fake_mapper([]))
+    assert t.renamed == ("$ Vehicle {vehicle_type: car  model_name: Porsche  insurance_premium: 3100 Kč/ monthly  "
+                         "highway_vignette_fee: 2300 Kč/yearly  odometer_reading: 120.000 / km}")
+    _, fb = ca.IdTable.from_model(SAMPLE, ontology=ca.Ontology(ontology_path))
+    assert fb.renamed == SAMPLE                                     # fallback names are not ontology terms
+
+
+def test_rewrite_writes_private_copy(monkeypatch, model, fake_claude):
+    before = model.read_bytes()
+    run_main(monkeypatch, model, "x", "--rewrite")
+    onto_md = model.parent / "cc_model.onto.md"
+    assert onto_md.read_text(encoding="utf-8").startswith("$ Vehicle {vehicle_type: car")
+    assert onto_md.stat().st_mode & 0o777 == 0o600
+    assert model.read_bytes() == before
+    for req in fake_claude:                                         # the copy is never sent anywhere
+        assert "model_name: Porsche" not in json.dumps(req, ensure_ascii=False, default=str)
+
+
+def test_prints_renamed_model(monkeypatch, capsys, model, fake_claude):
+    run_main(monkeypatch, model, "x", "--dry-run")
+    out = capsys.readouterr().out
+    assert "== Model with ontology names (local only) ==\n" + SAMPLE in out     # --dry-run: no mapper -> as written
+
+
+def test_rewrite_skipped_in_dry_run(monkeypatch, model, fake_claude):
+    run_main(monkeypatch, model, "x", "--rewrite", "--dry-run")
+    assert not (model.parent / "cc_model.onto.md").exists()
 
 
 def test_ontology_mapper_none(monkeypatch, capsys, model, fake_claude, ontology_path):
@@ -472,7 +556,7 @@ def test_ollama_mapper(monkeypatch, capsys, model, ontology_path):
     (url, body), = sent
     assert url == "http://127.0.0.1:9999/api/chat"
     assert body["model"] == "Qwen2.5-Coder:7b" and body["format"] == ca.ONTOLOGY_SCHEMA
-    assert "Vehicle.insurance_premium  (learned)" in capsys.readouterr().out
+    assert "$ property -> Vehicle  (learned)" in capsys.readouterr().out
     assert not ontology_path.exists()                    # dry-run: learned but not saved
 
     def down(*a, **k):

@@ -1,15 +1,177 @@
 {
   "format": "ccs-ontology/1",
   "classes": {
+    "Apartment": {
+      "label": "Apartment",
+      "same_as": "https://schema.org/Apartment",
+      "aliases": [
+        "byt"
+      ]
+    },
+    "Income": {
+      "label": "Income",
+      "same_as": "",
+      "aliases": [
+        "prijem"
+      ]
+    },
+    "Mortgage": {
+      "label": "Mortgage",
+      "same_as": "https://schema.org/MortgageLoan",
+      "aliases": [
+        "hypoteka"
+      ]
+    },
+    "SavingsAccount": {
+      "label": "Savings Account",
+      "same_as": "https://schema.org/BankAccount",
+      "aliases": [
+        "sporeni"
+      ]
+    },
     "Vehicle": {
       "label": "Vehicle",
       "same_as": "https://schema.org/Vehicle",
       "aliases": [
-        "property"
+        "property",
+        "auto"
       ]
     }
   },
   "terms": {
+    "Apartment.city": {
+      "label": "City",
+      "same_as": "https://schema.org/addressLocality",
+      "aliases": [
+        "mesto"
+      ]
+    },
+    "Apartment.energy_cost": {
+      "label": "Energy Cost",
+      "same_as": "",
+      "aliases": [
+        "energie"
+      ]
+    },
+    "Apartment.floor_area": {
+      "label": "Floor Area",
+      "same_as": "https://schema.org/floorSize",
+      "aliases": [
+        "plocha"
+      ]
+    },
+    "Apartment.rent_amount": {
+      "label": "Rent",
+      "same_as": "",
+      "aliases": [
+        "najemne"
+      ]
+    },
+    "Apartment.repair_fund_contribution": {
+      "label": "Repair Fund Contribution",
+      "same_as": "",
+      "aliases": [
+        "fond_oprav"
+      ]
+    },
+    "Income.annual_bonus": {
+      "label": "Annual Bonus",
+      "same_as": "",
+      "aliases": [
+        "bonus"
+      ]
+    },
+    "Income.employer_name": {
+      "label": "Employer",
+      "same_as": "https://schema.org/worksFor",
+      "aliases": [
+        "zamestnavatel"
+      ]
+    },
+    "Income.gross_salary": {
+      "label": "Gross Salary",
+      "same_as": "https://schema.org/baseSalary",
+      "aliases": [
+        "hruba_mzda"
+      ]
+    },
+    "Mortgage.bank_name": {
+      "label": "Bank",
+      "same_as": "",
+      "aliases": [
+        "banka"
+      ]
+    },
+    "Mortgage.interest_rate": {
+      "label": "Interest Rate",
+      "same_as": "https://schema.org/interestRate",
+      "aliases": [
+        "urokova_sazba"
+      ]
+    },
+    "Mortgage.loan_term": {
+      "label": "Loan Term",
+      "same_as": "",
+      "aliases": [
+        "splatnost"
+      ]
+    },
+    "Mortgage.principal_amount": {
+      "label": "Principal",
+      "same_as": "https://schema.org/loanTerm",
+      "aliases": [
+        "jistina"
+      ]
+    },
+    "SavingsAccount.account_balance": {
+      "label": "Balance",
+      "same_as": "https://schema.org/amount",
+      "aliases": [
+        "zustatek"
+      ]
+    },
+    "SavingsAccount.account_name": {
+      "label": "Account",
+      "same_as": "https://schema.org/accountId",
+      "aliases": [
+        "ucet"
+      ]
+    },
+    "SavingsAccount.interest_rate": {
+      "label": "Interest Rate",
+      "same_as": "https://schema.org/interestRate",
+      "aliases": [
+        "urok"
+      ]
+    },
+    "Vehicle.annual_mileage": {
+      "label": "Annual Mileage",
+      "same_as": "",
+      "aliases": [
+        "najeto_rocne"
+      ]
+    },
+    "Vehicle.brand": {
+      "label": "Brand",
+      "same_as": "https://schema.org/brand",
+      "aliases": [
+        "znacka"
+      ]
+    },
+    "Vehicle.fuel_consumption": {
+      "label": "Fuel Consumption",
+      "same_as": "https://schema.org/fuelConsumption",
+      "aliases": [
+        "spotreba"
+      ]
+    },
+    "Vehicle.fuel_price": {
+      "label": "Fuel Price",
+      "same_as": "",
+      "aliases": [
+        "cena_paliva"
+      ]
+    },
     "Vehicle.highway_vignette_fee": {
       "label": "Highway Vignette Fee",
       "same_as": "",
@@ -21,7 +183,15 @@
       "label": "Insurance Cost",
       "same_as": "",
       "aliases": [
-        "assurence_cost"
+        "assurence_cost",
+        "pojisteni"
+      ]
+    },
+    "Vehicle.maintenance_cost": {
+      "label": "Maintenance Cost",
+      "same_as": "",
+      "aliases": [
+        "servis"
       ]
     },
     "Vehicle.mileage_from_odometer": {
@@ -35,6 +205,13 @@
       "label": "Model",
       "same_as": "https://schema.org/model",
       "aliases": []
+    },
+    "Vehicle.production_year": {
+      "label": "Production Year",
+      "same_as": "https://schema.org/productionDate",
+      "aliases": [
+        "rok_vyroby"
+      ]
     },
     "Vehicle.vehicle_type": {
       "label": "Vehicle Type",

@@ -19,7 +19,8 @@ Usage:
   python ccs_anon.py cc_model.md "..." --code-file x.py   # skip the LLM, use your own code
   python ccs_anon.py cc_model.md "..." --public type      # keep 'type' values in clear text
   python ccs_anon.py cc_model.md "..." --table t.csv      # extra table export (.json/.csv/.md)
-  python ccs_anon.py cc_model.md "..." --no-ontology-llm  # map names from ontology.json only
+  python ccs_anon.py cc_model.md "..." --ontology-mapper none  # map names from ontology.json only
+  python ccs_anon.py cc_model.md "..." --rewrite          # also cc_model.onto.md: ontology names, real values
 """
 from __future__ import annotations
 
@@ -85,6 +86,13 @@ def parse_entities(text: str) -> list[dict]:
                           "raw": raw, "val_span": (off + k.end(), off + end), "unit": split_value(raw)[1]})
         entities.append({"name": ent.group(1), "name_span": ent.span(1), "items": items})
     return entities
+
+
+def apply_edits(text: str, edits: list[tuple[int, int, str]]) -> str:
+    """Replace non-overlapping (start, end, new) spans, back to front so offsets stay valid."""
+    for start, end, new in sorted(edits, reverse=True):
+        text = text[:start] + new + text[end:]
+    return text
 
 
 # --------------------------------------------------------------------------- #
@@ -224,27 +232,35 @@ class Record:
 class IdTable:
     COLUMNS = tuple(Record.__dataclass_fields__)
 
-    def __init__(self, records: list[Record], mapping: list[tuple] = ()):
+    def __init__(self, records: list[Record], mapping: list[tuple] = (), renamed: str = ""):
         self.records = records
         self.by_id = {r.id: r for r in records}
         self.mapping = list(mapping)      # (entity, key, term, status) for every key incl. public ones
+        self.renamed = renamed            # model with ontology names, REAL values (sensitive)
+        self.entities: list[tuple] = []   # (entity, class, status, [(key, property, id | None, unit)])
 
     # --- build ----------------------------------------------------------- #
     @classmethod
     def from_model(cls, text: str, public_keys: set[str] = frozenset(),
                    ontology: Ontology | None = None, mapper: Mapper | None = None) -> tuple[str, "IdTable"]:
-        """Normalize names to the ontology and anonymize values. Returns (text with IDs, table)."""
+        """Normalize names to the ontology and anonymize values. Returns (text with IDs, table).
+        table.renamed is the model with ontology names (fallbacks left as written) and real values."""
         entities = parse_entities(text)
         resolved = (ontology or Ontology()).resolve(entities, mapper)
-        records, mapping, edits = [], [], []
+        records, mapping, names, edits = [], [], [], []
         count, taken = {"N": 0, "T": 0}, set(RESERVED)
+        overview = []
         for e, (klass, props, status) in zip(entities, resolved):
-            edits.append((*e["name_span"], klass))
+            ok = status != "fallback"
+            names.append((*e["name_span"], klass, ok))
+            keys = []
+            overview.append((e["name"], klass, status, keys))
             for it in e["items"]:
                 key, prop = it["key"], props[it["key"]]
                 mapping.append((e["name"], key, f"{klass}.{prop}", status))
-                edits.append((*it["key_span"], prop))
+                names.append((*it["key_span"], prop, ok))
                 if key in public_keys:
+                    keys.append((key, prop, None, it["unit"]))
                     continue
                 value, unit = split_value(it["raw"])
                 kind = "T" if isinstance(value, str) else "N"
@@ -255,14 +271,23 @@ class IdTable:
                     var += "_"
                 taken.add(var)
                 records.append(Record(rid, e["name"], key, f"{klass}.{prop}", var, value, unit, it["raw"]))
+                keys.append((key, prop, rid, unit))
                 edits.append((*it["val_span"], f" {rid} [{unit}]  " if unit else f" {rid}  "))
-        for start, end, new in sorted(edits, reverse=True):
-            text = text[:start] + new + text[end:]
-        return text, cls(records, mapping)
+        table = cls(records, mapping, apply_edits(text, [n[:3] for n in names if n[3]]))
+        table.entities = overview
+        return apply_edits(text, [n[:3] for n in names] + edits), table
 
     def mapping_text(self) -> str:
-        w = max((len(f"{e}.{k}") for e, k, _, _ in self.mapping), default=0)
-        return "\n".join(f"  {f'{e}.{k}':<{w}} -> {t}  ({s})" for e, k, t, s in self.mapping)
+        """Per entity: name -> class (status), then key -> property -> ID [unit]. No values."""
+        items = [i for *_, keys in self.entities for i in keys]
+        wk = max((len(k) for k, *_ in items), default=0)
+        wp = max((len(p) for _, p, *_ in items), default=0)
+        lines = []
+        for name, klass, status, keys in self.entities:
+            lines.append(f"  $ {name} -> {klass}  ({status})")
+            lines += [f"      {k:<{wk}} -> {p:<{wp}}  {rid or 'public'}" + (f" [{u}]" if u else "")
+                      for k, p, rid, u in keys]
+        return "\n".join(lines)
 
     # --- lookup ---------------------------------------------------------- #
     def value(self, rid: str):
@@ -357,6 +382,7 @@ Rules for your code:
 - Straight-line code only: assignments, arithmetic, comparisons, if/else, dict/list/tuple literals.
   No imports, loops, functions, lambdas, comprehensions or subscripts.
 - Allowed calls: math.<fn>, abs, round, min, max, sum, len, float, int, str. Exponents must be literal numbers.
+  `math` is already available - do not import it.
 - Handle unit conversion explicitly (e.g. monthly -> yearly *12) and comment each step.
 - Finish by assigning a dict named `result` mapping human-readable labels to computed values."""
 
@@ -456,8 +482,12 @@ def ollama_map_terms(request: list, existing: dict, model: str) -> list:
     return json.loads(r.json()["message"]["content"])["entities"]
 
 
-def ask_llm(anon_model: str, prompt: str, model: str) -> str:
-    code = claude(SYSTEM, f"Anonymized model:\n{anon_model}\n\nTask:\n{prompt}", model)
+def ask_llm(anon_model: str, prompt: str, model: str, previous: str = "", error: str = "") -> str:
+    """previous/error: a rejected attempt (IDs only) and its value-free description, for a repair."""
+    user = f"Anonymized model:\n{anon_model}\n\nTask:\n{prompt}"
+    if previous:
+        user += f"\n\nYour previous code was rejected.\nCode:\n{previous}\n\nProblem: {error}\nReturn corrected code."
+    code = claude(SYSTEM, user, model)
     return re.sub(r"^```(?:python)?\s*|\s*```$", "", code)
 
 
@@ -475,37 +505,65 @@ ALLOWED_NODES = (
 MAX_EXPONENT = 100
 
 
+class CodeRejected(ValueError):
+    """Generated code broke a rule. The message is written by us and never contains values."""
+
+
+def describe_error(e: Exception) -> str:
+    """Value-free description of why code failed, safe to send back to the LLM.
+    Runtime messages can quote values (float('Porsche') -> "...: 'Porsche'"), so only the type is kept."""
+    if isinstance(e, CodeRejected):
+        return str(e)
+    if isinstance(e, SyntaxError):
+        return f"SyntaxError: {e.msg} (line {e.lineno})"
+    tb, line = e.__traceback__, "?"
+    while tb:
+        if tb.tb_frame.f_code.co_filename == "<llm_code>":
+            line = tb.tb_lineno
+        tb = tb.tb_next
+    return f"{type(e).__name__} at run time (line {line})"
+
+
 def validate(code: str, ids: set[str]) -> ast.Module:
     """Allow only straight-line arithmetic over the IDs; raise ValueError otherwise."""
     tree = ast.parse(code)
-    assigned = set()
+    assigned, loaded = set(), {}
     for node in ast.walk(tree):
         line = getattr(node, "lineno", "?")
         if not isinstance(node, ALLOWED_NODES):
-            raise ValueError(f"forbidden construct: {type(node).__name__} (line {line})")
+            raise CodeRejected(f"forbidden construct: {type(node).__name__} (line {line})")
         if isinstance(node, ast.Attribute) and not (
                 isinstance(node.value, ast.Name) and node.value.id == "math" and not node.attr.startswith("_")):
-            raise ValueError(f"forbidden attribute access (line {line})")
+            raise CodeRejected(f"forbidden attribute access (line {line})")
         if isinstance(node, ast.Name) and node.id.startswith("__"):
-            raise ValueError(f"forbidden name {node.id} (line {line})")
+            raise CodeRejected(f"forbidden name {node.id} (line {line})")
         if isinstance(node, ast.Call) and not isinstance(node.func, (ast.Name, ast.Attribute)):
-            raise ValueError(f"forbidden call form (line {line})")
+            raise CodeRejected(f"forbidden call form (line {line})")
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Pow) and not (
                 isinstance(node.right, ast.Constant) and isinstance(node.right.value, (int, float))
                 and abs(node.right.value) <= MAX_EXPONENT):
-            raise ValueError(f"exponent must be a literal number <= {MAX_EXPONENT} (line {line})")
-        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
-            assigned.add(node.id)
+            raise CodeRejected(f"exponent must be a literal number <= {MAX_EXPONENT} (line {line})")
+        if isinstance(node, ast.Name):
+            if isinstance(node.ctx, ast.Store):
+                assigned.add(node.id)
+            else:
+                loaded.setdefault(node.id, line)
     if "result" not in assigned:
-        raise ValueError("code does not assign `result`")
+        raise CodeRejected("code does not assign `result`")
     if assigned & ids:
-        raise ValueError(f"code overwrites input IDs: {sorted(assigned & ids)}")
+        raise CodeRejected(f"code overwrites input IDs: {sorted(assigned & ids)}")
+    unknown = sorted(set(loaded) - ids - assigned - set(SAFE_BUILTINS) - {"math"})
+    if unknown:
+        raise CodeRejected(f"undefined names (not IDs of the model, never assigned): {unknown} "
+                           f"(line {loaded[unknown[0]]})")
     return tree
 
 
 def execute(tree: ast.Module, table: IdTable) -> dict:
     env = {"__builtins__": SAFE_BUILTINS, "math": math, **table.values()}
     exec(compile(tree, "<llm_code>", "exec"), env)
+    if not isinstance(env["result"], dict):
+        raise CodeRejected(f"`result` must be a dict, got {type(env['result']).__name__}")
     return env["result"]
 
 
@@ -555,18 +613,24 @@ def main(argv: list[str] | None = None) -> dict | None:
     ap.add_argument("--out", type=Path, help="de-anonymized script (default: <model>.local.py)")
     ap.add_argument("--table", type=Path, action="append", default=[],
                     help="also export the ID table (.json/.csv/.md); repeatable")
+    ap.add_argument("--rewrite", action="store_true",
+                    help="also write <model>.onto<ext>: the model with ontology names, real values kept")
     ap.add_argument("--ontology", type=Path, help="ontology file (default: ontology.json next to the script)")
     ap.add_argument("--ontology-mapper", choices=["claude", "ollama", "none"], default="claude",
                     help="who maps unknown names: claude (remote, names only), ollama (local), "
                          "none (ontology file only; unknown names fall back to ASCII)")
     ap.add_argument("--ollama-model", default="Qwen2.5-Coder:7b")
     ap.add_argument("--llm-model", default="claude-opus-5")
+    ap.add_argument("--retries", type=int, default=2,
+                    help="repair attempts when the LLM's code is rejected (only a value-free error is sent)")
     ap.add_argument("--dry-run", action="store_true", help="show what would be sent, write nothing")
     a = ap.parse_args(argv)
 
     out = a.out or a.model_file.with_name(a.model_file.stem + ".local.py")
     onto_path = a.ontology or ONTOLOGY_PATH
-    if any(p.resolve() == a.model_file.resolve() for p in [out, onto_path, *a.table]):
+    renamed = a.model_file.with_name(a.model_file.stem + ".onto" + a.model_file.suffix)
+    extra = [*a.table, *([renamed] if a.rewrite else [])]
+    if any(p.resolve() == a.model_file.resolve() for p in [out, onto_path, *extra]):
         sys.exit(f"refusing to overwrite the model file {a.model_file}")
 
     ontology = Ontology(onto_path)
@@ -579,22 +643,34 @@ def main(argv: list[str] | None = None) -> dict | None:
     if not a.dry_run:
         ontology.save()
     prompt = table.scrub(a.prompt)
-    print(f"== Ontology mapping ({onto_path}) ==\n" + table.mapping_text())
+    print(f"== Entities: parse -> resolve ({onto_path}) -> anonymize ==\n" + table.mapping_text())
     if any(s == "fallback" for *_, s in table.mapping):
         print("  ! fallback = not in the ontology and not mapped by the LLM (ASCII name, not saved)")
     print("\n== ID conversion table (local only) ==\n" + table.to_text())
+    print("\n== Model with ontology names (local only) ==\n" + table.renamed.strip())
     print("\n== Sent to LLM ==\n" + anon.strip() + "\n\nTask: " + prompt)
     if a.dry_run:
         return None
 
     code = a.code_file.read_text(encoding="utf-8") if a.code_file else ask_llm(anon, prompt, a.llm_model)
-    print("\n== Code (IDs only) ==\n" + code.strip())
-    result = execute(validate(code, set(table.by_id)), table)
+    for attempt in range(a.retries + 1):
+        print("\n== Code (IDs only) ==\n" + code.strip())
+        try:
+            result = execute(validate(code, set(table.by_id)), table)
+            break
+        except Exception as e:                    # anything the generated code can raise
+            why = describe_error(e)
+            if a.code_file or attempt == a.retries:
+                sys.exit(f"code rejected: {why}")
+            print(f"\n!! rejected: {why} - asking for a fix ({attempt + 1}/{a.retries})")
+            code = ask_llm(anon, prompt, a.llm_model, code, why)
 
     write_private(out, render_script(code, table, a.model_file.name))
     for p in a.table:
         table.save(p)
-    print(f"\n== Saved (mode 600): {', '.join(map(str, [out, *a.table]))}")
+    if a.rewrite:
+        write_private(renamed, table.renamed)
+    print(f"\n== Saved (mode 600): {', '.join(map(str, [out, *extra]))}")
 
     print("\n== Result (computed locally with original values) ==")
     for k, v in result.items():
